@@ -222,7 +222,242 @@ app.get('/api/categories', (req, res) => {
 
 // ==================== EMPRESAS BRICS+ ====================
 
-// ... (manter todas as rotas de businesses existentes)
+// LISTAR TODAS AS EMPRESAS (com filtros)
+app.get('/api/businesses', async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { 
+      country, 
+      business_type, 
+      search, 
+      page = 1, 
+      limit = 10 
+    } = req.query;
+
+    let query = `
+      SELECT b.*, u.name as user_name, u.email as user_email 
+      FROM businesses b 
+      LEFT JOIN users u ON b.user_id = u.id 
+      WHERE b.is_active = true
+    `;
+    const params = [];
+    let paramCount = 0;
+
+    // Filtros
+    if (country) {
+      paramCount++;
+      query += ` AND b.country = $${paramCount}`;
+      params.push(country);
+    }
+
+    if (business_type) {
+      paramCount++;
+      query += ` AND b.business_type = $${paramCount}`;
+      params.push(business_type);
+    }
+
+    if (search) {
+      paramCount++;
+      query += ` AND (
+        b.company_name ILIKE $${paramCount} OR 
+        b.description ILIKE $${paramCount} OR 
+        b.products_services ILIKE $${paramCount}
+      )`;
+      params.push(`%${search}%`);
+    }
+
+    // Ordenação e paginação
+    query += ` ORDER BY b.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+
+    const result = await db.query(query, params);
+
+    // Contagem total
+    let countQuery = query.replace(/SELECT b\.\*, u\.name as user_name, u\.email as user_email/, 'SELECT COUNT(*)')
+                         .replace(/ORDER BY b\.created_at DESC LIMIT \$\d+ OFFSET \$\d+/, '');
+    const countResult = await db.query(countQuery, params.slice(0, -2));
+
+    res.json({
+      success: true,
+      businesses: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(countResult.rows[0].count),
+        totalPages: Math.ceil(countResult.rows[0].count / limit)
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao listar empresas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// BUSCAR EMPRESA POR ID
+app.get('/api/businesses/:id', async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      `SELECT b.*, u.name as user_name, u.email as user_email 
+       FROM businesses b 
+       LEFT JOIN users u ON b.user_id = u.id 
+       WHERE b.id = $1 AND b.is_active = true`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Empresa não encontrada'
+      });
+    }
+
+    res.json({
+      success: true,
+      business: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// CRIAR EMPRESA (PROTEGIDO)
+app.post('/api/businesses', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const {
+      company_name,
+      description,
+      country,
+      business_type,
+      products_services,
+      contact_email,
+      contact_phone,
+      website,
+      address,
+      annual_revenue,
+      employee_count,
+      brics_countries,
+      tags
+    } = req.body;
+
+    // Validações
+    if (!company_name || !country || !business_type) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nome da empresa, país e tipo de negócio são obrigatórios'
+      });
+    }
+
+    // Validar países BRICS+
+    if (brics_countries) {
+      const invalidCountries = brics_countries.filter(country => !BRICS_PLUS_COUNTRIES.includes(country));
+      if (invalidCountries.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Países BRICS+ inválidos: ${invalidCountries.join(', ')}. Países válidos: ${BRICS_PLUS_COUNTRIES.join(', ')}`
+        });
+      }
+    }
+
+    const result = await db.query(
+      `INSERT INTO businesses (
+        user_id, company_name, description, country, business_type, 
+        products_services, contact_email, contact_phone, website, 
+        address, annual_revenue, employee_count, brics_countries, tags
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING *`,
+      [
+        req.user.userId,
+        company_name,
+        description,
+        country,
+        business_type,
+        products_services,
+        contact_email,
+        contact_phone,
+        website,
+        address,
+        annual_revenue,
+        employee_count,
+        brics_countries,
+        tags
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Empresa cadastrada com sucesso! 🎉',
+      business: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Erro ao criar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// MINHAS EMPRESAS (PROTEGIDO)
+app.get('/api/my-businesses', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM businesses WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.user.userId]
+    );
+
+    res.json({
+      success: true,
+      businesses: result.rows,
+      count: result.rows.length
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar minhas empresas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
 
 // ==================== SISTEMA DE OPORTUNIDADES ====================
 
