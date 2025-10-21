@@ -81,7 +81,231 @@ app.get('/', (req, res) => {
 
 // === FIM DA ADIÇÃO ===
 // ==================== ROTAS DA API ====================
+// ==================== AUTENTICAÇÃO JWT ====================
 
+// Middleware para verificar JWT
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: 'Token de acesso requerido'
+    });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret', (err, user) => {
+    if (err) {
+      return res.status(403).json({
+        success: false,
+        message: 'Token inválido ou expirado'
+      });
+    }
+    req.user = user;
+    next();
+  });
+};
+
+// Rota base de auth - INFO
+app.get('/api/auth', (req, res) => {
+  res.json({
+    success: true,
+    message: '🔐 Sistema de Autenticação BBH',
+    endpoints: {
+      register: 'POST /api/auth/register',
+      login: 'POST /api/auth/login',
+      forgot_password: 'POST /api/auth/forgot-password',
+      reset_password: 'POST /api/auth/reset-password',
+      profile: 'GET /api/auth/profile (protected)'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// REGISTRO DE USUÁRIO
+app.post('/api/auth/register', async (req, res) => {
+  try {
+    const { name, email, password, company_name, country, business_segment } = req.body;
+
+    // Validações básicas
+    if (!name || !email || !password || !company_name) {
+      return res.status(400).json({
+        success: false,
+        message: 'Todos os campos obrigatórios devem ser preenchidos'
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Senha deve ter pelo menos 6 caracteres'
+      });
+    }
+
+    // Verificar se usuário já existe
+    const userExists = await db.query(
+      'SELECT id FROM users WHERE email = $1',
+      [email]
+    );
+
+    if (userExists.rows.length > 0) {
+      return res.status(409).json({
+        success: false,
+        message: 'Usuário já cadastrado com este email'
+      });
+    }
+
+    // Hash da senha
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+    // Inserir usuário
+    const result = await db.query(
+      `INSERT INTO users (name, email, password, company_name, country, business_segment) 
+       VALUES ($1, $2, $3, $4, $5, $6) 
+       RETURNING id, name, email, company_name, country, business_segment, created_at`,
+      [name, email, hashedPassword, company_name, country, business_segment]
+    );
+
+    const user = result.rows[0];
+
+    // Gerar token JWT
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email 
+      },
+      process.env.JWT_SECRET || 'fallback_secret',
+      { expiresIn: '24h' }
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuário registrado com sucesso!',
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        company_name: user.company_name,
+        country: user.country,
+        business_segment: user.business_segment,
+        created_at: user.created_at
+      },
+      token: token
+    });
+
+  } catch (error) {
+    console.error('Erro no registro:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// LOGIN DE USUÁRIO
+app.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email e senha são obrigatórios'
+      });
+    }
+
+    // Buscar usuário
+    const result = await db.query(
+      `SELECT id, name, email, password, company_name, country, business_segment, created_at 
+       FROM users WHERE email = $1`,
+      [email]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        message: 'Credenciais inválidas'
+      });
+    }
+
+    const user = result.rows[0];
+
+    // Verificar senha
+    const validPassword = await bcrypt.compare(password, user.password);
+    if (!validPassword) {
+      return res.status(401).json({
+        success: false,
+        message: 'Credenciais inválidas'
+      });
+    }
+
+    // Gerar token JWT
+    const token = jwt.sign(
+      { 
+        userId: user.id, 
+        email: user.email 
+      },
+      process.env.JWT_SECRET || 'fallback_secret',
+      { expiresIn: '24h' }
+    );
+
+    res.json({
+      success: true,
+      message: 'Login realizado com sucesso!',
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        company_name: user.company_name,
+        country: user.country,
+        business_segment: user.business_segment,
+        created_at: user.created_at
+      },
+      token: token
+    });
+
+  } catch (error) {
+    console.error('Erro no login:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// PERFIL DO USUÁRIO (PROTEGIDO)
+app.get('/api/auth/profile', authenticateToken, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT id, name, email, company_name, country, business_segment, created_at 
+       FROM users WHERE id = $1`,
+      [req.user.userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuário não encontrado'
+      });
+    }
+
+    const user = result.rows[0];
+
+    res.json({
+      success: true,
+      user: user
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar perfil:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
 // Health Check
 app.get('/api/health', (req, res) => {
   res.json({
