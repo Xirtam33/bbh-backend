@@ -773,7 +773,103 @@ app.get('/api/opportunities/:id/matches', authenticateToken, async (req, res) =>
     });
   }
 });
+// ==================== SISTEMA DE MATCHES ====================
 
+// GERAR MATCHES (versão atual - pode manter para compatibilidade)
+app.get('/api/opportunities/:id/matches', authenticateToken, async (req, res) => {
+  // ... (código atual existente)
+});
+
+// GERAR MATCHES MELHORADO (NOVA VERSÃO - adicione aqui)
+app.get('/api/opportunities/:id/matches-v2', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Buscar a oportunidade
+    const opportunityResult = await db.query(
+      'SELECT * FROM opportunities WHERE id = $1',
+      [id]
+    );
+
+    if (opportunityResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Oportunidade não encontrada'
+      });
+    }
+
+    const opportunity = opportunityResult.rows[0];
+    let matchQuery = '';
+    let params = [];
+
+    if (opportunity.type === 'offer') {
+      // OPORTUNIDADE DE EXPORTAÇÃO: buscar importadores em outros países
+      matchQuery = `
+        SELECT b.*, 
+               CASE 
+                 WHEN $1::text = ANY(b.brics_countries) THEN 10
+                 WHEN b.business_type ILIKE '%import%' THEN 8
+                 ELSE 0
+               END as match_score
+        FROM businesses b
+        WHERE b.is_active = true
+        AND b.country != $2  -- Não buscar no mesmo país
+        AND ($1::text = ANY(b.brics_countries) OR b.business_type ILIKE '%import%')
+        ORDER BY match_score DESC
+        LIMIT 20
+      `;
+      params = [opportunity.country, opportunity.country];
+    } else {
+      // OPORTUNIDADE DE IMPORTAÇÃO: buscar exportadores
+      matchQuery = `
+        SELECT b.*, 
+               CASE 
+                 WHEN b.country = $1 THEN 10
+                 WHEN $2::text = ANY(b.brics_countries) THEN 8
+                 WHEN b.business_type ILIKE '%export%' THEN 6
+                 ELSE 0
+               END as match_score
+        FROM businesses b
+        WHERE b.is_active = true
+        AND (b.country = $1 OR $2::text = ANY(b.brics_countries) OR b.business_type ILIKE '%export%')
+        ORDER BY match_score DESC
+        LIMIT 20
+      `;
+      params = [opportunity.country, opportunity.country];
+    }
+
+    const matchResult = await db.query(matchQuery, params);
+
+    res.json({
+      success: true,
+      opportunity: opportunity,
+      matches: matchResult.rows,
+      match_count: matchResult.rows.length,
+      match_logic: opportunity.type === 'offer' ? 'exportação → importação' : 'importação → exportação'
+    });
+
+  } catch (error) {
+    console.error('Erro ao gerar matches:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// ==================== DASHBOARD ====================
+
+// DASHBOARD COMPLETO (PROTEGIDO)
+app.get('/api/dashboard', authenticateToken, async (req, res) => {
+  // ... (código atual do dashboard)
+});
 // ==================== DASHBOARD ====================
 
 // DASHBOARD COMPLETO (PROTEGIDO)
