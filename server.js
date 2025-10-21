@@ -10,9 +10,6 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-console.log('🔧 Iniciando servidor...');
-console.log('DATABASE_URL:', process.env.DATABASE_URL ? '✅ Configurada' : '❌ Não configurada');
-
 // Configuração do banco
 let db;
 let dbConnected = false;
@@ -26,25 +23,16 @@ async function initializeDatabase() {
       return;
     }
 
-    console.log('📝 DATABASE_URL:', process.env.DATABASE_URL.replace(/:[^:]*@/, ':****@')); // Esconde senha
-    
     db = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { 
-        rejectUnauthorized: false,
-        require: true
-      },
-      connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 30000
+      ssl: { rejectUnauthorized: false }
     });
 
     // Testar conexão
-    console.log('🔄 Conectando...');
     const client = await db.connect();
     console.log('✅ Conectado ao PostgreSQL com sucesso!');
     
     // Criar tabelas
-    console.log('🔄 Criando tabelas...');
     await client.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -64,7 +52,6 @@ async function initializeDatabase() {
     
   } catch (error) {
     console.error('❌ Erro na conexão com o banco:', error.message);
-    console.error('📋 Detalhes do erro:', error);
     dbConnected = false;
   }
 }
@@ -95,7 +82,46 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
+// Auth Info
+app.get('/api/auth', (req, res) => {
+  res.json({
+    success: true,
+    message: '🔐 Sistema de Autenticação BBH',
+    timestamp: new Date().toISOString(),
+    database: dbConnected ? 'connected' : 'disconnected',
+    endpoints: {
+      register: 'POST /api/auth/register',
+      login: 'POST /api/auth/login'
+    }
+  });
+});
+
+// Rota de teste do banco
+app.get('/api/test-db', async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Banco de dados não conectado'
+    });
+  }
+
+  try {
+    const result = await db.query('SELECT NOW() as current_time');
+    res.json({
+      success: true,
+      message: '✅ Banco de dados funcionando!',
+      current_time: result.rows[0].current_time
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: '❌ Erro no banco de dados',
+      error: error.message
+    });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
-  console.log(`🗄️ Status do banco: ${dbConnected ? '✅ CONECTADO' : '❌ DESCONECTADO'}`);
+  console.log(`🗄️ Status do banco: ${dbConnected ? 'CONECTADO' : 'DESCONECTADO'}`);
 });
