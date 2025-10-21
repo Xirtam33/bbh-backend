@@ -12,6 +12,14 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Lista expandida de países BRICS+
+const BRICS_PLUS_COUNTRIES = [
+  'Brazil', 'Russia', 'India', 'China', 'South Africa',
+  'Argentina', 'Egypt', 'Ethiopia', 'Iran', 'Saudi Arabia',
+  'United Arab Emirates', 'Mexico', 'Nigeria', 'Turkey',
+  'Indonesia', 'Bangladesh', 'Vietnam', 'Thailand', 'Malaysia'
+];
+
 // Configuração do banco
 let db;
 let dbConnected = false;
@@ -47,8 +55,40 @@ async function initializeDatabase() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS businesses (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        company_name VARCHAR(255) NOT NULL,
+        description TEXT,
+        country VARCHAR(100) NOT NULL,
+        business_type VARCHAR(100) NOT NULL,
+        products_services TEXT,
+        contact_email VARCHAR(255),
+        contact_phone VARCHAR(50),
+        website VARCHAR(255),
+        address TEXT,
+        annual_revenue VARCHAR(100),
+        employee_count VARCHAR(50),
+        brics_countries TEXT[], -- Array para países BRICS+ de interesse
+        tags TEXT[], -- Tags para busca
+        is_verified BOOLEAN DEFAULT FALSE,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
     
-    console.log('✅ Tabela de usuários verificada/criada!');
+    // Índices para busca rápida
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_businesses_country ON businesses(country);
+      CREATE INDEX IF NOT EXISTS idx_businesses_business_type ON businesses(business_type);
+      CREATE INDEX IF NOT EXISTS idx_businesses_tags ON businesses USING gin(tags);
+      CREATE INDEX IF NOT EXISTS idx_businesses_brics_countries ON businesses USING gin(brics_countries);
+    `);
+    
+    console.log('✅ Tabelas verificadas/criadas com sucesso!');
     client.release();
     dbConnected = true;
     
@@ -94,7 +134,8 @@ app.get('/', (req, res) => {
     success: true,
     message: '🚀 BBH Backend API - BRICS Business Hub',
     timestamp: new Date().toISOString(),
-    database: dbConnected ? 'connected' : 'disconnected'
+    database: dbConnected ? 'connected' : 'disconnected',
+    countries: BRICS_PLUS_COUNTRIES
   });
 });
 
@@ -121,6 +162,16 @@ app.get('/api/auth', (req, res) => {
       login: 'POST /api/auth/login',
       profile: 'GET /api/auth/profile (protected)'
     }
+  });
+});
+
+// Info dos países BRICS+
+app.get('/api/countries', (req, res) => {
+  res.json({
+    success: true,
+    countries: BRICS_PLUS_COUNTRIES,
+    count: BRICS_PLUS_COUNTRIES.length,
+    timestamp: new Date().toISOString()
   });
 });
 
@@ -388,8 +439,405 @@ app.get('/api/users', authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== EMPRESAS BRICS+ ====================
+
+// LISTAR TODAS AS EMPRESAS (com filtros)
+app.get('/api/businesses', async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { 
+      country, 
+      business_type, 
+      search, 
+      page = 1, 
+      limit = 10 
+    } = req.query;
+
+    let query = `
+      SELECT b.*, u.name as user_name, u.email as user_email 
+      FROM businesses b 
+      LEFT JOIN users u ON b.user_id = u.id 
+      WHERE b.is_active = true
+    `;
+    const params = [];
+    let paramCount = 0;
+
+    // Filtros
+    if (country) {
+      paramCount++;
+      query += ` AND b.country = $${paramCount}`;
+      params.push(country);
+    }
+
+    if (business_type) {
+      paramCount++;
+      query += ` AND b.business_type = $${paramCount}`;
+      params.push(business_type);
+    }
+
+    if (search) {
+      paramCount++;
+      query += ` AND (
+        b.company_name ILIKE $${paramCount} OR 
+        b.description ILIKE $${paramCount} OR 
+        b.products_services ILIKE $${paramCount}
+      )`;
+      params.push(`%${search}%`);
+    }
+
+    // Ordenação e paginação
+    query += ` ORDER BY b.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
+
+    const result = await db.query(query, params);
+
+    // Contagem total
+    let countQuery = query.replace(/SELECT b\.\*, u\.name as user_name, u\.email as user_email/, 'SELECT COUNT(*)')
+                         .replace(/ORDER BY b\.created_at DESC LIMIT \$\d+ OFFSET \$\d+/, '');
+    const countResult = await db.query(countQuery, params.slice(0, -2));
+
+    res.json({
+      success: true,
+      businesses: result.rows,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: parseInt(countResult.rows[0].count),
+        totalPages: Math.ceil(countResult.rows[0].count / limit)
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao listar empresas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// BUSCAR EMPRESA POR ID
+app.get('/api/businesses/:id', async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      `SELECT b.*, u.name as user_name, u.email as user_email 
+       FROM businesses b 
+       LEFT JOIN users u ON b.user_id = u.id 
+       WHERE b.id = $1 AND b.is_active = true`,
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Empresa não encontrada'
+      });
+    }
+
+    res.json({
+      success: true,
+      business: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// CRIAR EMPRESA (PROTEGIDO)
+app.post('/api/businesses', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const {
+      company_name,
+      description,
+      country,
+      business_type,
+      products_services,
+      contact_email,
+      contact_phone,
+      website,
+      address,
+      annual_revenue,
+      employee_count,
+      brics_countries,
+      tags
+    } = req.body;
+
+    // Validações
+    if (!company_name || !country || !business_type) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nome da empresa, país e tipo de negócio são obrigatórios'
+      });
+    }
+
+    // Validar países BRICS+
+    if (brics_countries) {
+      const invalidCountries = brics_countries.filter(country => !BRICS_PLUS_COUNTRIES.includes(country));
+      if (invalidCountries.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Países BRICS+ inválidos: ${invalidCountries.join(', ')}. Países válidos: ${BRICS_PLUS_COUNTRIES.join(', ')}`
+        });
+      }
+    }
+
+    const result = await db.query(
+      `INSERT INTO businesses (
+        user_id, company_name, description, country, business_type, 
+        products_services, contact_email, contact_phone, website, 
+        address, annual_revenue, employee_count, brics_countries, tags
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      RETURNING *`,
+      [
+        req.user.userId,
+        company_name,
+        description,
+        country,
+        business_type,
+        products_services,
+        contact_email,
+        contact_phone,
+        website,
+        address,
+        annual_revenue,
+        employee_count,
+        brics_countries,
+        tags
+      ]
+    );
+
+    res.status(201).json({
+      success: true,
+      message: 'Empresa cadastrada com sucesso! 🎉',
+      business: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Erro ao criar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// ATUALIZAR EMPRESA (PROTEGIDO - apenas dono)
+app.put('/api/businesses/:id', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { id } = req.params;
+    const updateFields = req.body;
+
+    // Verificar se a empresa existe e pertence ao usuário
+    const existingBusiness = await db.query(
+      'SELECT user_id FROM businesses WHERE id = $1',
+      [id]
+    );
+
+    if (existingBusiness.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Empresa não encontrada'
+      });
+    }
+
+    if (existingBusiness.rows[0].user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Acesso negado - esta empresa pertence a outro usuário'
+      });
+    }
+
+    // Validar países BRICS+ se for atualizado
+    if (updateFields.brics_countries) {
+      const invalidCountries = updateFields.brics_countries.filter(country => !BRICS_PLUS_COUNTRIES.includes(country));
+      if (invalidCountries.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Países BRICS+ inválidos: ${invalidCountries.join(', ')}`
+        });
+      }
+    }
+
+    // Construir query dinâmica
+    const setClause = Object.keys(updateFields)
+      .map((key, index) => `${key} = $${index + 2}`)
+      .join(', ');
+    
+    const values = Object.values(updateFields);
+    values.unshift(id);
+
+    const result = await db.query(
+      `UPDATE businesses 
+       SET ${setClause}, updated_at = CURRENT_TIMESTAMP 
+       WHERE id = $1 
+       RETURNING *`,
+      values
+    );
+
+    res.json({
+      success: true,
+      message: 'Empresa atualizada com sucesso! ✅',
+      business: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('Erro ao atualizar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// DELETAR EMPRESA (PROTEGIDO - apenas dono)
+app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const { id } = req.params;
+
+    // Verificar se a empresa existe e pertence ao usuário
+    const existingBusiness = await db.query(
+      'SELECT user_id FROM businesses WHERE id = $1',
+      [id]
+    );
+
+    if (existingBusiness.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Empresa não encontrada'
+      });
+    }
+
+    if (existingBusiness.rows[0].user_id !== req.user.userId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Acesso negado - esta empresa pertence a outro usuário'
+      });
+    }
+
+    await db.query('DELETE FROM businesses WHERE id = $1', [id]);
+
+    res.json({
+      success: true,
+      message: 'Empresa deletada com sucesso! 🗑️'
+    });
+
+  } catch (error) {
+    console.error('Erro ao deletar empresa:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// MINHAS EMPRESAS (PROTEGIDO)
+app.get('/api/my-businesses', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const result = await db.query(
+      'SELECT * FROM businesses WHERE user_id = $1 ORDER BY created_at DESC',
+      [req.user.userId]
+    );
+
+    res.json({
+      success: true,
+      businesses: result.rows,
+      count: result.rows.length
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar minhas empresas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// ESTATÍSTICAS DE EMPRESAS (PROTEGIDO)
+app.get('/api/businesses-stats', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    const totalBusinesses = await db.query('SELECT COUNT(*) FROM businesses WHERE is_active = true');
+    const businessesByCountry = await db.query('SELECT country, COUNT(*) FROM businesses WHERE is_active = true GROUP BY country ORDER BY COUNT(*) DESC');
+    const recentBusinesses = await db.query('SELECT COUNT(*) FROM businesses WHERE created_at >= NOW() - INTERVAL \'7 days\'');
+
+    res.json({
+      success: true,
+      stats: {
+        total: parseInt(totalBusinesses.rows[0].count),
+        by_country: businessesByCountry.rows,
+        recent_week: parseInt(recentBusinesses.rows[0].count),
+        countries_supported: BRICS_PLUS_COUNTRIES.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Erro ao buscar estatísticas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🗄️ Status do banco: ${dbConnected ? 'CONECTADO' : 'DESCONECTADO'}`);
+  console.log(`🌍 Países BRICS+: ${BRICS_PLUS_COUNTRIES.length} países`);
   console.log(`🔐 Sistema de autenticação: ✅ PRONTO`);
+  console.log(`🏢 Sistema de empresas: ✅ PRONTO`);
 });
