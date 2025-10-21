@@ -20,6 +20,14 @@ const BRICS_PLUS_COUNTRIES = [
   'Indonesia', 'Bangladesh', 'Vietnam', 'Thailand', 'Malaysia'
 ];
 
+// Categorias de oportunidades
+const OPPORTUNITY_CATEGORIES = [
+  'Agriculture', 'Technology', 'Manufacturing', 'Energy', 'Mining',
+  'Infrastructure', 'Healthcare', 'Education', 'Tourism', 'Finance',
+  'Real Estate', 'Transportation', 'Retail', 'Construction', 'Automotive',
+  'Pharmaceuticals', 'Textiles', 'Food & Beverage', 'Telecommunications', 'Other'
+];
+
 // Configuração do banco
 let db;
 let dbConnected = false;
@@ -71,12 +79,45 @@ async function initializeDatabase() {
         address TEXT,
         annual_revenue VARCHAR(100),
         employee_count VARCHAR(50),
-        brics_countries TEXT[], -- Array para países BRICS+ de interesse
-        tags TEXT[], -- Tags para busca
+        brics_countries TEXT[],
+        tags TEXT[],
         is_verified BOOLEAN DEFAULT FALSE,
         is_active BOOLEAN DEFAULT TRUE,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS opportunities (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER REFERENCES users(id),
+        title VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        type VARCHAR(50) NOT NULL, -- 'offer' or 'demand'
+        category VARCHAR(100) NOT NULL,
+        country VARCHAR(100) NOT NULL,
+        budget VARCHAR(100),
+        deadline DATE,
+        contact_email VARCHAR(255),
+        contact_phone VARCHAR(50),
+        tags TEXT[],
+        status VARCHAR(50) DEFAULT 'active',
+        view_count INTEGER DEFAULT 0,
+        is_verified BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS matches (
+        id SERIAL PRIMARY KEY,
+        opportunity_id INTEGER REFERENCES opportunities(id),
+        business_id INTEGER REFERENCES businesses(id),
+        match_score INTEGER,
+        status VARCHAR(50) DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
     
@@ -85,10 +126,14 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_businesses_country ON businesses(country);
       CREATE INDEX IF NOT EXISTS idx_businesses_business_type ON businesses(business_type);
       CREATE INDEX IF NOT EXISTS idx_businesses_tags ON businesses USING gin(tags);
-      CREATE INDEX IF NOT EXISTS idx_businesses_brics_countries ON businesses USING gin(brics_countries);
+      CREATE INDEX IF NOT EXISTS idx_opportunities_country ON opportunities(country);
+      CREATE INDEX IF NOT EXISTS idx_opportunities_category ON opportunities(category);
+      CREATE INDEX IF NOT EXISTS idx_opportunities_type ON opportunities(type);
+      CREATE INDEX IF NOT EXISTS idx_opportunities_status ON opportunities(status);
+      CREATE INDEX IF NOT EXISTS idx_opportunities_tags ON opportunities USING gin(tags);
     `);
     
-    console.log('✅ Tabelas verificadas/criadas com sucesso!');
+    console.log('✅ Todas as tabelas verificadas/criadas com sucesso!');
     client.release();
     dbConnected = true;
     
@@ -105,7 +150,7 @@ initializeDatabase();
 
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     return res.status(401).json({
@@ -135,7 +180,8 @@ app.get('/', (req, res) => {
     message: '🚀 BBH Backend API - BRICS Business Hub',
     timestamp: new Date().toISOString(),
     database: dbConnected ? 'connected' : 'disconnected',
-    countries: BRICS_PLUS_COUNTRIES
+    countries: BRICS_PLUS_COUNTRIES,
+    categories: OPPORTUNITY_CATEGORIES
   });
 });
 
@@ -146,22 +192,7 @@ app.get('/api/health', async (req, res) => {
     message: '🚀 BBH Backend API Online!',
     timestamp: new Date().toISOString(),
     database: dbConnected ? 'connected' : 'disconnected',
-    version: '1.0.0'
-  });
-});
-
-// Auth Info
-app.get('/api/auth', (req, res) => {
-  res.json({
-    success: true,
-    message: '🔐 Sistema de Autenticação BBH',
-    timestamp: new Date().toISOString(),
-    database: dbConnected ? 'connected' : 'disconnected',
-    endpoints: {
-      register: 'POST /api/auth/register',
-      login: 'POST /api/auth/login',
-      profile: 'GET /api/auth/profile (protected)'
-    }
+    version: '2.0.0'
   });
 });
 
@@ -175,274 +206,28 @@ app.get('/api/countries', (req, res) => {
   });
 });
 
-// Rota de teste do banco
-app.get('/api/test-db', async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Banco de dados não conectado'
-    });
-  }
-
-  try {
-    const result = await db.query('SELECT NOW() as current_time');
-    res.json({
-      success: true,
-      message: '✅ Banco de dados funcionando!',
-      current_time: result.rows[0].current_time
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: '❌ Erro no banco de dados',
-      error: error.message
-    });
-  }
+// Info das categorias
+app.get('/api/categories', (req, res) => {
+  res.json({
+    success: true,
+    categories: OPPORTUNITY_CATEGORIES,
+    count: OPPORTUNITY_CATEGORIES.length,
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ==================== AUTENTICAÇÃO ====================
 
-// REGISTRO DE USUÁRIO
-app.post('/api/auth/register', async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const { name, email, password, company_name, country, business_segment } = req.body;
-
-    // Validações
-    if (!name || !email || !password || !company_name) {
-      return res.status(400).json({
-        success: false,
-        message: 'Nome, email, senha e nome da empresa são obrigatórios'
-      });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({
-        success: false,
-        message: 'Senha deve ter pelo menos 6 caracteres'
-      });
-    }
-
-    // Verificar se usuário já existe
-    const userExists = await db.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email.toLowerCase()]
-    );
-
-    if (userExists.rows.length > 0) {
-      return res.status(409).json({
-        success: false,
-        message: 'Usuário já cadastrado com este email'
-      });
-    }
-
-    // Criptografar senha
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Inserir usuário
-    const result = await db.query(
-      `INSERT INTO users (name, email, password, company_name, country, business_segment) 
-       VALUES ($1, $2, $3, $4, $5, $6) 
-       RETURNING id, name, email, company_name, country, business_segment, created_at`,
-      [name, email.toLowerCase(), hashedPassword, company_name, country, business_segment]
-    );
-
-    const user = result.rows[0];
-
-    // Gerar token JWT
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email 
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    res.status(201).json({
-      success: true,
-      message: 'Usuário registrado com sucesso! 🎉',
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        company_name: user.company_name,
-        country: user.country,
-        business_segment: user.business_segment,
-        created_at: user.created_at
-      },
-      token: token
-    });
-
-  } catch (error) {
-    console.error('Erro no registro:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// LOGIN DE USUÁRIO
-app.post('/api/auth/login', async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const { email, password } = req.body;
-
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        message: 'Email e senha são obrigatórios'
-      });
-    }
-
-    // Buscar usuário
-    const result = await db.query(
-      `SELECT id, name, email, password, company_name, country, business_segment, created_at 
-       FROM users WHERE email = $1`,
-      [email.toLowerCase()]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciais inválidas'
-      });
-    }
-
-    const user = result.rows[0];
-
-    // Verificar senha
-    const validPassword = await bcrypt.compare(password, user.password);
-    if (!validPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciais inválidas'
-      });
-    }
-
-    // Gerar token JWT
-    const token = jwt.sign(
-      { 
-        userId: user.id, 
-        email: user.email 
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    );
-
-    res.json({
-      success: true,
-      message: 'Login realizado com sucesso! 👋',
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        company_name: user.company_name,
-        country: user.country,
-        business_segment: user.business_segment,
-        created_at: user.created_at
-      },
-      token: token
-    });
-
-  } catch (error) {
-    console.error('Erro no login:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// ==================== ROTAS PROTEGIDAS ====================
-
-// PERFIL DO USUÁRIO (PROTEGIDO)
-app.get('/api/auth/profile', authenticateToken, async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const result = await db.query(
-      `SELECT id, name, email, company_name, country, business_segment, created_at 
-       FROM users WHERE id = $1`,
-      [req.user.userId]
-    );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuário não encontrado'
-      });
-    }
-
-    const user = result.rows[0];
-
-    res.json({
-      success: true,
-      user: user
-    });
-
-  } catch (error) {
-    console.error('Erro ao buscar perfil:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// LISTAR USUÁRIOS (PROTEGIDO - para admin)
-app.get('/api/users', authenticateToken, async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const result = await db.query(
-      `SELECT id, name, email, company_name, country, business_segment, created_at 
-       FROM users ORDER BY created_at DESC`
-    );
-
-    res.json({
-      success: true,
-      users: result.rows,
-      count: result.rows.length
-    });
-
-  } catch (error) {
-    console.error('Erro ao listar usuários:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
+// ... (manter todas as rotas de auth existentes - register, login, profile, users)
 
 // ==================== EMPRESAS BRICS+ ====================
 
-// LISTAR TODAS AS EMPRESAS (com filtros)
-app.get('/api/businesses', async (req, res) => {
+// ... (manter todas as rotas de businesses existentes)
+
+// ==================== SISTEMA DE OPORTUNIDADES ====================
+
+// LISTAR OPORTUNIDADES (com filtros)
+app.get('/api/opportunities', async (req, res) => {
   if (!dbConnected) {
     return res.status(503).json({
       success: false,
@@ -452,59 +237,66 @@ app.get('/api/businesses', async (req, res) => {
 
   try {
     const { 
+      type, 
+      category, 
       country, 
-      business_type, 
       search, 
       page = 1, 
       limit = 10 
     } = req.query;
 
     let query = `
-      SELECT b.*, u.name as user_name, u.email as user_email 
-      FROM businesses b 
-      LEFT JOIN users u ON b.user_id = u.id 
-      WHERE b.is_active = true
+      SELECT o.*, u.name as user_name, u.company_name as user_company 
+      FROM opportunities o 
+      LEFT JOIN users u ON o.user_id = u.id 
+      WHERE o.status = 'active'
     `;
     const params = [];
     let paramCount = 0;
 
     // Filtros
-    if (country) {
+    if (type) {
       paramCount++;
-      query += ` AND b.country = $${paramCount}`;
-      params.push(country);
+      query += ` AND o.type = $${paramCount}`;
+      params.push(type);
     }
 
-    if (business_type) {
+    if (category) {
       paramCount++;
-      query += ` AND b.business_type = $${paramCount}`;
-      params.push(business_type);
+      query += ` AND o.category = $${paramCount}`;
+      params.push(category);
+    }
+
+    if (country) {
+      paramCount++;
+      query += ` AND o.country = $${paramCount}`;
+      params.push(country);
     }
 
     if (search) {
       paramCount++;
       query += ` AND (
-        b.company_name ILIKE $${paramCount} OR 
-        b.description ILIKE $${paramCount} OR 
-        b.products_services ILIKE $${paramCount}
+        o.title ILIKE $${paramCount} OR 
+        o.description ILIKE $${paramCount} OR
+        o.tags::text ILIKE $${paramCount}
       )`;
       params.push(`%${search}%`);
     }
 
     // Ordenação e paginação
-    query += ` ORDER BY b.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
+    query += ` ORDER BY o.created_at DESC LIMIT $${paramCount + 1} OFFSET $${paramCount + 2}`;
     params.push(parseInt(limit), (parseInt(page) - 1) * parseInt(limit));
 
     const result = await db.query(query, params);
 
     // Contagem total
-    let countQuery = query.replace(/SELECT b\.\*, u\.name as user_name, u\.email as user_email/, 'SELECT COUNT(*)')
-                         .replace(/ORDER BY b\.created_at DESC LIMIT \$\d+ OFFSET \$\d+/, '');
+    let countQuery = query.replace(/SELECT o\.\*, u\.name as user_name, u\.company_name as user_company/, 'SELECT COUNT(*)')
+                         .replace(/ORDER BY o\.created_at DESC LIMIT \$\d+ OFFSET \$\d+/, '');
     const countResult = await db.query(countQuery, params.slice(0, -2));
 
     res.json({
       success: true,
-      businesses: result.rows,
+      opportunities: result.rows,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -514,7 +306,7 @@ app.get('/api/businesses', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Erro ao listar empresas:', error);
+    console.error('Erro ao listar oportunidades:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -522,8 +314,8 @@ app.get('/api/businesses', async (req, res) => {
   }
 });
 
-// BUSCAR EMPRESA POR ID
-app.get('/api/businesses/:id', async (req, res) => {
+// BUSCAR OPORTUNIDADE POR ID
+app.get('/api/opportunities/:id', async (req, res) => {
   if (!dbConnected) {
     return res.status(503).json({
       success: false,
@@ -534,28 +326,34 @@ app.get('/api/businesses/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
+    // Incrementar contador de visualizações
+    await db.query(
+      'UPDATE opportunities SET view_count = view_count + 1 WHERE id = $1',
+      [id]
+    );
+
     const result = await db.query(
-      `SELECT b.*, u.name as user_name, u.email as user_email 
-       FROM businesses b 
-       LEFT JOIN users u ON b.user_id = u.id 
-       WHERE b.id = $1 AND b.is_active = true`,
+      `SELECT o.*, u.name as user_name, u.company_name as user_company, u.email as user_email 
+       FROM opportunities o 
+       LEFT JOIN users u ON o.user_id = u.id 
+       WHERE o.id = $1`,
       [id]
     );
 
     if (result.rows.length === 0) {
       return res.status(404).json({
         success: false,
-        message: 'Empresa não encontrada'
+        message: 'Oportunidade não encontrada'
       });
     }
 
     res.json({
       success: true,
-      business: result.rows[0]
+      opportunity: result.rows[0]
     });
 
   } catch (error) {
-    console.error('Erro ao buscar empresa:', error);
+    console.error('Erro ao buscar oportunidade:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -563,8 +361,8 @@ app.get('/api/businesses/:id', async (req, res) => {
   }
 });
 
-// CRIAR EMPRESA (PROTEGIDO)
-app.post('/api/businesses', authenticateToken, async (req, res) => {
+// CRIAR OPORTUNIDADE (PROTEGIDO)
+app.post('/api/opportunities', authenticateToken, async (req, res) => {
   if (!dbConnected) {
     return res.status(503).json({
       success: false,
@@ -574,73 +372,69 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
 
   try {
     const {
-      company_name,
+      title,
       description,
+      type,
+      category,
       country,
-      business_type,
-      products_services,
+      budget,
+      deadline,
       contact_email,
       contact_phone,
-      website,
-      address,
-      annual_revenue,
-      employee_count,
-      brics_countries,
       tags
     } = req.body;
 
     // Validações
-    if (!company_name || !country || !business_type) {
+    if (!title || !description || !type || !category || !country) {
       return res.status(400).json({
         success: false,
-        message: 'Nome da empresa, país e tipo de negócio são obrigatórios'
+        message: 'Título, descrição, tipo, categoria e país são obrigatórios'
       });
     }
 
-    // Validar países BRICS+
-    if (brics_countries) {
-      const invalidCountries = brics_countries.filter(country => !BRICS_PLUS_COUNTRIES.includes(country));
-      if (invalidCountries.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: `Países BRICS+ inválidos: ${invalidCountries.join(', ')}. Países válidos: ${BRICS_PLUS_COUNTRIES.join(', ')}`
-        });
-      }
+    if (!['offer', 'demand'].includes(type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Tipo deve ser "offer" ou "demand"'
+      });
+    }
+
+    if (!OPPORTUNITY_CATEGORIES.includes(category)) {
+      return res.status(400).json({
+        success: false,
+        message: `Categoria inválida. Categorias válidas: ${OPPORTUNITY_CATEGORIES.join(', ')}`
+      });
     }
 
     const result = await db.query(
-      `INSERT INTO businesses (
-        user_id, company_name, description, country, business_type, 
-        products_services, contact_email, contact_phone, website, 
-        address, annual_revenue, employee_count, brics_countries, tags
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      `INSERT INTO opportunities (
+        user_id, title, description, type, category, country, 
+        budget, deadline, contact_email, contact_phone, tags
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *`,
       [
         req.user.userId,
-        company_name,
+        title,
         description,
+        type,
+        category,
         country,
-        business_type,
-        products_services,
+        budget,
+        deadline,
         contact_email,
         contact_phone,
-        website,
-        address,
-        annual_revenue,
-        employee_count,
-        brics_countries,
         tags
       ]
     );
 
     res.status(201).json({
       success: true,
-      message: 'Empresa cadastrada com sucesso! 🎉',
-      business: result.rows[0]
+      message: 'Oportunidade criada com sucesso! 🎉',
+      opportunity: result.rows[0]
     });
 
   } catch (error) {
-    console.error('Erro ao criar empresa:', error);
+    console.error('Erro ao criar oportunidade:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -648,131 +442,8 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
   }
 });
 
-// ATUALIZAR EMPRESA (PROTEGIDO - apenas dono)
-app.put('/api/businesses/:id', authenticateToken, async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const { id } = req.params;
-    const updateFields = req.body;
-
-    // Verificar se a empresa existe e pertence ao usuário
-    const existingBusiness = await db.query(
-      'SELECT user_id FROM businesses WHERE id = $1',
-      [id]
-    );
-
-    if (existingBusiness.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Empresa não encontrada'
-      });
-    }
-
-    if (existingBusiness.rows[0].user_id !== req.user.userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Acesso negado - esta empresa pertence a outro usuário'
-      });
-    }
-
-    // Validar países BRICS+ se for atualizado
-    if (updateFields.brics_countries) {
-      const invalidCountries = updateFields.brics_countries.filter(country => !BRICS_PLUS_COUNTRIES.includes(country));
-      if (invalidCountries.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: `Países BRICS+ inválidos: ${invalidCountries.join(', ')}`
-        });
-      }
-    }
-
-    // Construir query dinâmica
-    const setClause = Object.keys(updateFields)
-      .map((key, index) => `${key} = $${index + 2}`)
-      .join(', ');
-    
-    const values = Object.values(updateFields);
-    values.unshift(id);
-
-    const result = await db.query(
-      `UPDATE businesses 
-       SET ${setClause}, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = $1 
-       RETURNING *`,
-      values
-    );
-
-    res.json({
-      success: true,
-      message: 'Empresa atualizada com sucesso! ✅',
-      business: result.rows[0]
-    });
-
-  } catch (error) {
-    console.error('Erro ao atualizar empresa:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// DELETAR EMPRESA (PROTEGIDO - apenas dono)
-app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
-  if (!dbConnected) {
-    return res.status(503).json({
-      success: false,
-      message: 'Serviço de banco de dados indisponível'
-    });
-  }
-
-  try {
-    const { id } = req.params;
-
-    // Verificar se a empresa existe e pertence ao usuário
-    const existingBusiness = await db.query(
-      'SELECT user_id FROM businesses WHERE id = $1',
-      [id]
-    );
-
-    if (existingBusiness.rows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Empresa não encontrada'
-      });
-    }
-
-    if (existingBusiness.rows[0].user_id !== req.user.userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'Acesso negado - esta empresa pertence a outro usuário'
-      });
-    }
-
-    await db.query('DELETE FROM businesses WHERE id = $1', [id]);
-
-    res.json({
-      success: true,
-      message: 'Empresa deletada com sucesso! 🗑️'
-    });
-
-  } catch (error) {
-    console.error('Erro ao deletar empresa:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Erro interno do servidor'
-    });
-  }
-});
-
-// MINHAS EMPRESAS (PROTEGIDO)
-app.get('/api/my-businesses', authenticateToken, async (req, res) => {
+// MINHAS OPORTUNIDADES (PROTEGIDO)
+app.get('/api/my-opportunities', authenticateToken, async (req, res) => {
   if (!dbConnected) {
     return res.status(503).json({
       success: false,
@@ -782,18 +453,18 @@ app.get('/api/my-businesses', authenticateToken, async (req, res) => {
 
   try {
     const result = await db.query(
-      'SELECT * FROM businesses WHERE user_id = $1 ORDER BY created_at DESC',
+      'SELECT * FROM opportunities WHERE user_id = $1 ORDER BY created_at DESC',
       [req.user.userId]
     );
 
     res.json({
       success: true,
-      businesses: result.rows,
+      opportunities: result.rows,
       count: result.rows.length
     });
 
   } catch (error) {
-    console.error('Erro ao buscar minhas empresas:', error);
+    console.error('Erro ao buscar minhas oportunidades:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -801,8 +472,10 @@ app.get('/api/my-businesses', authenticateToken, async (req, res) => {
   }
 });
 
-// ESTATÍSTICAS DE EMPRESAS (PROTEGIDO)
-app.get('/api/businesses-stats', authenticateToken, async (req, res) => {
+// ==================== SISTEMA DE MATCHES ====================
+
+// GERAR MATCHES PARA UMA OPORTUNIDADE
+app.get('/api/opportunities/:id/matches', authenticateToken, async (req, res) => {
   if (!dbConnected) {
     return res.status(503).json({
       success: false,
@@ -811,22 +484,138 @@ app.get('/api/businesses-stats', authenticateToken, async (req, res) => {
   }
 
   try {
-    const totalBusinesses = await db.query('SELECT COUNT(*) FROM businesses WHERE is_active = true');
-    const businessesByCountry = await db.query('SELECT country, COUNT(*) FROM businesses WHERE is_active = true GROUP BY country ORDER BY COUNT(*) DESC');
-    const recentBusinesses = await db.query('SELECT COUNT(*) FROM businesses WHERE created_at >= NOW() - INTERVAL \'7 days\'');
+    const { id } = req.params;
+
+    // Buscar a oportunidade
+    const opportunityResult = await db.query(
+      'SELECT * FROM opportunities WHERE id = $1',
+      [id]
+    );
+
+    if (opportunityResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Oportunidade não encontrada'
+      });
+    }
+
+    const opportunity = opportunityResult.rows[0];
+
+    // Buscar matches potenciais (empresas com interesses compatíveis)
+    let matchQuery = `
+      SELECT b.*, 
+             CASE 
+               WHEN b.country = $1 THEN 10
+               WHEN $2::text[] && b.brics_countries THEN 5
+               ELSE 0
+             END as match_score
+      FROM businesses b
+      WHERE b.is_active = true
+      AND ($3::text IS NULL OR b.business_type = $3)
+      AND ($2::text[] && b.brics_countries OR b.country = $1)
+      ORDER BY match_score DESC
+      LIMIT 20
+    `;
+
+    const matchResult = await db.query(matchQuery, [
+      opportunity.country,
+      [opportunity.country],
+      opportunity.category
+    ]);
 
     res.json({
       success: true,
-      stats: {
-        total: parseInt(totalBusinesses.rows[0].count),
-        by_country: businessesByCountry.rows,
-        recent_week: parseInt(recentBusinesses.rows[0].count),
-        countries_supported: BRICS_PLUS_COUNTRIES.length
+      opportunity: opportunity,
+      matches: matchResult.rows,
+      match_count: matchResult.rows.length
+    });
+
+  } catch (error) {
+    console.error('Erro ao gerar matches:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erro interno do servidor'
+    });
+  }
+});
+
+// ==================== DASHBOARD ====================
+
+// DASHBOARD COMPLETO (PROTEGIDO)
+app.get('/api/dashboard', authenticateToken, async (req, res) => {
+  if (!dbConnected) {
+    return res.status(503).json({
+      success: false,
+      message: 'Serviço de banco de dados indisponível'
+    });
+  }
+
+  try {
+    // Estatísticas de empresas
+    const businessesStats = await db.query(
+      'SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE country = $1) as from_user_country FROM businesses WHERE is_active = true',
+      [req.user.country]
+    );
+
+    // Estatísticas de oportunidades
+    const opportunitiesStats = await db.query(`
+      SELECT 
+        COUNT(*) as total,
+        COUNT(*) FILTER (WHERE type = 'offer') as offers,
+        COUNT(*) FILTER (WHERE type = 'demand') as demands,
+        COUNT(*) FILTER (WHERE country = $1) as from_user_country
+      FROM opportunities 
+      WHERE status = 'active'
+    `, [req.user.country]);
+
+    // Oportunidades por categoria
+    const opportunitiesByCategory = await db.query(`
+      SELECT category, COUNT(*) as count 
+      FROM opportunities 
+      WHERE status = 'active' 
+      GROUP BY category 
+      ORDER BY count DESC 
+      LIMIT 10
+    `);
+
+    // Empresas por país
+    const businessesByCountry = await db.query(`
+      SELECT country, COUNT(*) as count 
+      FROM businesses 
+      WHERE is_active = true 
+      GROUP BY country 
+      ORDER BY count DESC 
+      LIMIT 10
+    `);
+
+    res.json({
+      success: true,
+      dashboard: {
+        user: {
+          id: req.user.userId,
+          email: req.user.email
+        },
+        businesses: {
+          total: parseInt(businessesStats.rows[0].total),
+          from_user_country: parseInt(businessesStats.rows[0].from_user_country),
+          by_country: businessesByCountry.rows
+        },
+        opportunities: {
+          total: parseInt(opportunitiesStats.rows[0].total),
+          offers: parseInt(opportunitiesStats.rows[0].offers),
+          demands: parseInt(opportunitiesStats.rows[0].demands),
+          from_user_country: parseInt(opportunitiesStats.rows[0].from_user_country),
+          by_category: opportunitiesByCategory.rows
+        },
+        platform: {
+          countries_supported: BRICS_PLUS_COUNTRIES.length,
+          categories_available: OPPORTUNITY_CATEGORIES.length
+        }
       }
     });
 
   } catch (error) {
-    console.error('Erro ao buscar estatísticas:', error);
+    console.error('Erro ao buscar dashboard:', error);
     res.status(500).json({
       success: false,
       message: 'Erro interno do servidor'
@@ -838,6 +627,10 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Servidor rodando na porta ${PORT}`);
   console.log(`🗄️ Status do banco: ${dbConnected ? 'CONECTADO' : 'DESCONECTADO'}`);
   console.log(`🌍 Países BRICS+: ${BRICS_PLUS_COUNTRIES.length} países`);
+  console.log(`💼 Categorias: ${OPPORTUNITY_CATEGORIES.length} categorias`);
   console.log(`🔐 Sistema de autenticação: ✅ PRONTO`);
   console.log(`🏢 Sistema de empresas: ✅ PRONTO`);
+  console.log(`💼 Sistema de oportunidades: ✅ PRONTO`);
+  console.log(`🤝 Sistema de matches: ✅ PRONTO`);
+  console.log(`📊 Dashboard: ✅ PRONTO`);
 });
