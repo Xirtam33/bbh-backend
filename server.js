@@ -1,24 +1,3 @@
-// === ADICIONE ESTAS LINHAS ===
-
-// Rota raiz - Resolve "Cannot GET /"
-app.get('/', (req, res) => {
-  res.json({
-    success: true,
-    message: '🚀 BBH Backend API - BRICS Business Hub',
-    version: '1.0.0',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: '/api/health',
-      auth: '/api/auth',
-      users: '/api/users'
-      // Adicione outras rotas que você tiver
-    },
-    documentation: 'https://github.com/Xirtam33/bbh-backend',
-    status: '🟢 Online'
-  });
-});
-
-// === FIM DA ADIÇÃO ===
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -80,7 +59,27 @@ async function initializeDatabase() {
     console.error('❌ Erro ao inicializar banco:', error);
   }
 }
+// === ADICIONE ESTAS LINHAS ===
 
+// Rota raiz - Resolve "Cannot GET /"
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    message: '🚀 BBH Backend API - BRICS Business Hub',
+    version: '1.0.0',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/api/health',
+      auth: '/api/auth',
+      users: '/api/users'
+      // Adicione outras rotas que você tiver
+    },
+    documentation: 'https://github.com/Xirtam33/bbh-backend',
+    status: '🟢 Online'
+  });
+});
+
+// === FIM DA ADIÇÃO ===
 // ==================== ROTAS DA API ====================
 
 // Health Check
